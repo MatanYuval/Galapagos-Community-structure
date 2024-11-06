@@ -1,0 +1,198 @@
+import numpy as np
+import open3d as o3d
+
+chunk = Metashape.app.document.chunk
+
+tie_points_in_region = []
+
+# Iterate over all tie points in the chunk and select every 1000th point
+for i, tie_point in enumerate(chunk.model.vertices):
+    if i % 1000 == 0:  # Select every 1000th point
+        tie_point_position = chunk.transform.matrix.mulp(tie_point.coord[:3])
+        tie_points_in_region.append(tie_point_position)
+
+# Convert the list to a NumPy array
+vertices_np = np.array(tie_points_in_region)
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(vertices_np)
+
+# Step 1: Fit a plane to the point cloud and get the normal vector
+plane_model, inliers = pcd.segment_plane(distance_threshold=0.5, ransac_n=3, num_iterations=1000)
+[a, b, c, d] = plane_model  # The plane equation coefficients
+normal_vector = np.array([a, b, c])
+normal_vector = np.array([a, b, c])
+# Normalize the normal vector (just in case)
+normal_vector = normal_vector / np.linalg.norm(normal_vector)
+# Define the target normal for the X-Y plane alignment (usually Z-axis [0, 0, 1])
+target_normal = np.array([0, 0, 1])
+# Calculate the rotation axis using the cross product
+rotation_axis = np.cross(normal_vector, target_normal)
+rotation_axis_norm = np.linalg.norm(rotation_axis)
+
+# Handle cases where the normal vector is already aligned with the target normal
+if rotation_axis_norm > 1e-6:  # Tolerance to check if rotation is needed
+    rotation_axis = rotation_axis / rotation_axis_norm  # Normalize the axis
+    angle = np.arccos(np.dot(normal_vector, target_normal))  # Angle between vectors
+
+    # Get the rotation matrix from axis and angle
+    R = o3d.geometry.get_rotation_matrix_from_axis_angle(rotation_axis * angle)
+else:
+    R = np.eye(3)  # No rotation needed
+# Step 2: Create the plane mesh
+# Choose a plane size that matches the scale of your point cloud
+plane_size = 10.0  # Adjust this size as necessary
+center = pcd.get_center()
+plane_points = np.array([
+    [plane_size, plane_size, (-d - a * plane_size - b * plane_size) / c],
+    [-plane_size, plane_size, (-d + a * plane_size - b * plane_size) / c],
+    [-plane_size, -plane_size, (-d + a * plane_size + b * plane_size) / c],
+    [plane_size, -plane_size, (-d - a * plane_size + b * plane_size) / c],
+])
+plane = o3d.geometry.TriangleMesh()
+plane.vertices = o3d.utility.Vector3dVector(plane_points)
+plane.triangles = o3d.utility.Vector3iVector([[0, 1, 2], [2, 3, 0]])
+plane.compute_vertex_normals()
+plane.paint_uniform_color([0, 1, 0])  # Green color for the plane
+
+# Step 3: Visualize the point cloud, plane, and normal arrow
+# Create an arrow mesh to represent the normal vector
+arrow = o3d.geometry.TriangleMesh.create_arrow(
+    cone_radius=0.2,
+    cone_height=5,
+    cylinder_radius=0.1,
+    cylinder_height=2
+)
+arrow.paint_uniform_color([1, 0, 0])  # Red arrow for visualization
+
+# Calculate the rotation matrix to align normal_vector with [0, 0, 1] (z-axis)
+
+pcd.rotate(R)
+coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=5)
+# Show the point cloud, plane, and arrow
+o3d.visualization.draw_geometries([pcd, plane, arrow, coordinate_frame])
+
+chunk.transform.rotation = R.T
+
+obb = pcd.get_minimal_oriented_bounding_box()
+
+center = obb.center
+
+pcd.translate(-center)
+
+chunk.transform.translation = - np.asarray(center)
+obb = pcd.get_axis_aligned_bounding_box()
+
+tr = chunk.transform.translation
+
+tr_2 = np.asarray(tr) - np.asarray(obb.get_center())
+
+chunk.transform.translation
+
+chunk.transform.translation = tr_2
+
+
+tie_points_in_region = []
+
+# Iterate over all tie points in the chunk and select every 1000th point
+for i, tie_point in enumerate(chunk.model.vertices):
+    if i % 1000 == 0:  # Select every 1000th point
+        tie_point_position = chunk.transform.matrix.mulp(tie_point.coord[:3])
+        tie_points_in_region.append(tie_point_position)
+
+# Convert the list to a NumPy array
+vertices_np = np.array(tie_points_in_region)
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(vertices_np)
+obb = pcd.get_minimal_oriented_bounding_box()
+
+R = obb.R
+
+# Calculate the angle of rotation around the Z-axis
+theta_z = math.atan2(R[1, 0], R[0, 0])
+
+# Negate the angle for the opposite rotation
+theta_z_neg = -theta_z
+
+# Convert the angle from radians to degrees (optional)
+theta_z_neg_degrees = math.degrees(theta_z_neg)
+
+print(f"Rotation angle around Z axis (negative): {theta_z_neg} radians")
+print(f"Rotation angle around Z axis (negative): {theta_z_neg_degrees} degrees")
+
+rotation_matrix_neg_z = np.array([
+    [math.cos(theta_z_neg), -math.sin(theta_z_neg), 0],
+    [math.sin(theta_z_neg), math.cos(theta_z_neg), 0],
+    [0, 0, 1]
+])
+
+# Step 3: Get the original transformation matrix from the chunk
+T_original = chunk.transform.matrix
+T_original_np = np.array(T_original).reshape(4, 4)  # Convert to 4x4 matrix
+
+# Step 4: Apply the Z-axis rotation matrix to the rotation part of the transformation matrix
+rotation_matrix = T_original_np[0:3, 0:3]
+T_new = T_original_np.copy()
+
+# Apply the Z-axis rotation matrix
+T_new[0:3, 0:3] = np.dot(rotation_matrix_neg_z, rotation_matrix)
+
+# Step 5: Apply the updated transformation back to the chunk
+T_new_metashape = Metashape.Matrix(T_new)
+chunk.transform.matrix = T_new_metashape
+
+# Step 6: Verify the updated chunk transform matrix
+print("Updated chunk transform matrix:\n", chunk.transform.matrix)
+
+
+import Metashape
+import math
+
+# Initialize document and chunk
+doc = Metashape.app.document
+chunk = doc.chunk
+
+# Transformation matrix of the chunk
+T = chunk.transform.matrix
+
+# Transform the origin (0, 0, 0) in the chunk coordinate system
+v_t = T.mulp(Metashape.Vector([0, 0, 0]))
+
+# Calculate the local frame based on the chunk's CRS
+if chunk.crs:
+    m = chunk.crs.localframe(v_t)  # Local frame around the origin
+else:
+    m = Metashape.Matrix().Diag([1, 1, 1, 1])  # Identity matrix if no CRS
+
+# Combine transformation matrices
+m = m * T
+
+# Calculate the scale factor
+s = math.sqrt(m[0, 0] ** 2 + m[0, 1] ** 2 + m[0, 2] ** 2)
+
+# Extract and normalize the rotation matrix
+R = Metashape.Matrix([
+    [m[0, 0], m[0, 1], m[0, 2]],
+    [m[1, 0], m[1, 1], m[1, 2]],
+    [m[2, 0], m[2, 1], m[2, 2]]
+]) * (1. / s)
+
+# Set the rotation of the region to align with the chunk
+reg = chunk.region
+reg.rot = R.t()
+
+# Set the new center of the region to (0, 0, 0)
+# Coordinates are transformed using inverse of chunk's transformation matrix
+new_center_global = Metashape.Vector([0, 0, 0])  # Global center target
+reg.center = T.inv().mulp(new_center_global)  # Transform to chunk's local coordinates
+
+# Define new size for the region in local units
+new_size = Metashape.Vector([10.5, 10.5, 10])  # Size in coordinate system units
+
+# Apply the scaling factor to the new region size
+S = chunk.transform.scale
+reg.size = new_size / S  # Normalize the size by the scaling factor
+
+# Update the chunk with the adjusted region
+chunk.region = reg
+
+print("Script finished!")
