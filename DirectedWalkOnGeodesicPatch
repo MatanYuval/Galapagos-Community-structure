@@ -1,0 +1,216 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+import seaborn as sns
+
+# Assuming merged_df is your DataFrame
+
+import time
+import open3d as o3d
+import numpy as np
+import pyvista as pv
+import time
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Qt5Agg')
+
+import open3d as o3d
+import numpy as np
+import pyvista as pv
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib
+print(np.__version__)
+matplotlib.use('Qt5Agg')
+import os
+import pandas as pd
+
+# Define the folder path containing the mesh files
+folder_path = "path_to_your_folder"
+
+# Initialize an empty DataFrame for merged results
+merged_df = pd.DataFrame()
+
+# Iterate over each file in the folder
+for step_counter, file_name in enumerate(os.listdir(folder_path)):
+    if file_name.endswith(".ply"):  # Adjust this extension check as needed
+        file_path = os.path.join(folder_path, file_name)
+
+        # Load the mesh (assuming a function to load based on your setup)
+        pcd = o3d.io.read_point_cloud(file_path)  # Replace `load_mesh_function` with actual function
+        obb = pcd.get_axis_aligned_bounding_box()#.get_oriented_bounding_box()#pcd.get_oriented_bounding_box()
+        obb_corners = np.asarray(obb.get_box_points())  # Get the 8 corners of the OBB
+        bottom_corner = obb_corners.min(axis=0)  # The lowest corner in all axes
+        translation_vector = -bottom_corner  # Translation to move the bottom corner to (0, 0, 0)
+        pcd.translate(translation_vector)
+        points = np.asarray(pcd.points)
+        pcd_colors = np.asarray(pcd.colors)
+        print('run Poisson surface reconstruction')
+        with o3d.utility.VerbosityContextManager(
+                o3d.utility.VerbosityLevel.Debug) as cm:
+            mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                pcd, depth=9)
+        min_bound = mesh.get_min_bound()  # [x_min, y_min, z_min]
+        max_bound = mesh.get_max_bound()  # [x_max, y_max, z_max]
+        # Initialize step sizes
+        y_min = np.min(points[:, 1]) + 0.2
+        y_max = np.max(points[:, 1]) - 0.2
+        # Run the directed geodesic walk on the mesh
+        step_counter_df = directed_geodesic_walk(mesh, y_min, y_max)
+        # Convert the result to a DataFrame if needed
+        step_counter_df = pd.DataFrame(step_counter_df)
+        # Add the 'site' column based on the step counter or file name
+        base_name = os.path.basename(filename)
+        site_name = base_name.split('_')[0]
+        step_counter_df['site'] = site_name
+        # Merge the result into the main DataFrame
+        merged_df = pd.concat([merged_df, step_counter_df], axis=0, ignore_index=True)
+
+def directed_geodesic_walk(mesh, y_min, y_max):
+    step_sizes = [0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 0.99, 1.1, 1.2, 1.4, 1.5, 1.7, 2, 2.5, 3, 5]
+    step_counter_df = []
+
+    min_bound = np.min(np.asarray(mesh.vertices), axis=0)
+    max_bound = np.max(np.asarray(mesh.vertices), axis=0)
+
+    step_size = 0.01
+    slice_size = 0.05
+    for y in np.arange(y_min, y_max, step_size)[::10]:
+        y = np.round(y, 3)
+        print(y)
+        crop_min_bound = [min_bound[0], y, min_bound[2]]
+        crop_max_bound = [max_bound[0], y + slice_size, max_bound[2]]
+
+        cropped_mesh = mesh.crop(o3d.geometry.AxisAlignedBoundingBox(crop_min_bound, crop_max_bound))
+        cropped_mesh.translate(np.array([0, 0, 1]))
+        vertices = np.asarray(cropped_mesh.vertices)
+        triangles = np.asarray(cropped_mesh.triangles)
+        formatted_triangles = np.hstack([np.full((triangles.shape[0], 1), 3), triangles])
+        pv_mesh = pv.PolyData(vertices, formatted_triangles).extract_largest()
+
+        # Compute forward geodesic path
+        min_x_index = np.argmin(pv_mesh.points[:, 0])
+        max_x_index = np.argmax(pv_mesh.points[:, 0])
+        geodesic_path = pv_mesh.geodesic(min_x_index, max_x_index)
+        geodesic_points = geodesic_path.points
+        length = np.sum(np.linalg.norm(np.diff(geodesic_points, axis=0), axis=1))
+
+        # Reverse the geodesic path points
+        rev_geodesic_points = geodesic_points[::-1]
+        rev_length = np.sum(np.linalg.norm(np.diff(rev_geodesic_points, axis=0), axis=1))
+
+        # Convert geodesic paths to Open3D PointCloud
+        pcd_for_walk = o3d.geometry.PointCloud()
+        pcd_for_walk.points = o3d.utility.Vector3dVector(geodesic_points)
+        pcd_for_walk_dense = densify_point_cloud(densify_point_cloud(densify_point_cloud(pcd_for_walk)))
+
+        rev_pcd_for_walk_dense = o3d.geometry.PointCloud()
+        rev_pcd_for_walk_dense.points = o3d.utility.Vector3dVector(rev_geodesic_points)
+        rev_pcd_for_walk_dense = densify_point_cloud(densify_point_cloud(densify_point_cloud(rev_pcd_for_walk_dense)))
+
+        pcd_tree = o3d.geometry.KDTreeFlann(pcd_for_walk_dense)
+        rev_pcd_tree = o3d.geometry.KDTreeFlann(rev_pcd_for_walk_dense)
+
+        for radius in step_sizes:
+            counter, current_index, distance_on_path = 0, 0, 0
+            current_point = pcd_for_walk_dense.points[current_index]
+            target_point = pcd_for_walk_dense.points[-1]
+
+            while np.linalg.norm(current_point - target_point) > radius:
+                radius_small = radius - 0.005
+                _, idx1, _ = pcd_tree.search_radius_vector_3d(current_point, radius_small)
+                _, idx2, _ = pcd_tree.search_radius_vector_3d(current_point, radius)
+                neighbor_steps = np.array(list(set(idx2) - set(idx1)), dtype=int)
+
+                valid_neighbor_indices = [idx for idx in neighbor_steps if idx > current_index]
+
+                if len(valid_neighbor_indices) == 0:
+                    counter = 0
+                    break
+                if np.linalg.norm(current_point - target_point) < radius:
+                    distance_on_path += np.linalg.norm(current_point - target_point)
+                    counter += 1
+                    break
+                minimal_neighbor = min(valid_neighbor_indices, key=lambda idx: pcd_for_walk_dense.points[idx][0])
+                current_index = minimal_neighbor
+                distance_on_path += np.linalg.norm(current_point - pcd_for_walk_dense.points[current_index])
+                current_point = pcd_for_walk_dense.points[current_index]
+                counter += 1
+
+            # Reverse walk
+            rev_counter, rev_current_index, rev_distance_on_path = 0, 0, 0
+            rev_current_point = rev_pcd_for_walk_dense.points[rev_current_index]
+            rev_target_point = rev_pcd_for_walk_dense.points[-1]
+
+            while np.linalg.norm(rev_current_point - rev_target_point) > radius:
+                _, idx1, _ = rev_pcd_tree.search_radius_vector_3d(rev_current_point, radius_small)
+                _, idx2, _ = rev_pcd_tree.search_radius_vector_3d(rev_current_point, radius)
+                rev_neighbor_steps = np.array(list(set(idx2) - set(idx1)), dtype=int)
+
+                rev_valid_neighbor_indices = [idx for idx in rev_neighbor_steps if idx > rev_current_index]
+
+                if len(rev_valid_neighbor_indices) == 0:
+                    rev_counter = 0
+                    break
+                if np.linalg.norm(rev_current_point - rev_target_point) < radius:
+                    rev_distance_on_path += np.linalg.norm(rev_current_point - rev_target_point)
+                    rev_counter += 1
+                    break
+                rev_minimal_neighbor = max(rev_valid_neighbor_indices,
+                                           key=lambda idx: rev_pcd_for_walk_dense.points[idx][0])
+                rev_current_index = rev_minimal_neighbor
+                rev_distance_on_path += np.linalg.norm(
+                    rev_current_point - rev_pcd_for_walk_dense.points[rev_current_index])
+                rev_current_point = rev_pcd_for_walk_dense.points[rev_current_index]
+                rev_counter += 1
+            print(radius, counter, rev_counter)
+            # Collect data
+            step_counter_df.append({
+                'y_coord': y,
+                'num_steps': (counter + rev_counter) / 2 if counter != 0 and rev_counter != 0 else 0,
+                'step size': radius,
+                'distance': (distance_on_path + rev_distance_on_path) / 2,
+                'geodesic_length': (length + rev_length) / 2,
+                'euclidean_distance': np.linalg.norm(pv_mesh.points[min_x_index] - pv_mesh.points[max_x_index]),
+            })
+
+    return step_counter_df
+
+
+pcd2 = o3d.io.read_point_cloud('C:/Users/matan.yuval/Desktop/DarwinMay24_3DModel2.ply')
+
+pcd_colors = np.asarray(pcd.colors)
+obb = pcd.get_minimal_oriented_bounding_box()
+pcd2.rotate(obb.R.T)
+obb = pcd2.get_oriented_bounding_box()
+# Step 2: Get the Oriented Bounding Box (OBB) of the point cloud
+obb = pcd2.get_axis_aligned_bounding_box()#.get_oriented_bounding_box()#pcd.get_oriented_bounding_box()
+obb.color = (1, 0, 0)  # Color the OBB for visualization purposes
+
+# Step 3: Find the bottom corner of the OBB
+obb_corners = np.asarray(obb.get_box_points())  # Get the 8 corners of the OBB
+bottom_corner = obb_corners.min(axis=0)  # The lowest corner in all axes
+# Step 4: Translate the point cloud so that the bottom corner is at the origin
+translation_vector = -bottom_corner  # Translation to move the bottom corner to (0, 0, 0)
+pcd2.translate(translation_vector)
+points = np.asarray(pcd.points)
+pcd_colors = np.asarray(pcd.colors)
+print('run Poisson surface reconstruction')
+with o3d.utility.VerbosityContextManager(
+        o3d.utility.VerbosityLevel.Debug) as cm:
+    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+        pcd, depth=9)
+print(mesh)
+coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=5)
+
+o3d.visualization.draw_geometries([mesh, obb, coordinate_frame])
+
+
+min_bound = mesh.get_min_bound()  # [x_min, y_min, z_min]
+max_bound = mesh.get_max_bound()  # [x_max, y_max, z_max]
+# Initialize step sizes
+y_min = np.min(points[:, 1]) + 0.2
+y_max = np.max(points[:, 1]) - 0.2
