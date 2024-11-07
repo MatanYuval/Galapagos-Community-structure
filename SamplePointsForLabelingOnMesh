@@ -1,0 +1,158 @@
+
+import os
+import pandas as pd
+import Metashape
+import open3d as o3d
+import os
+import Metashape
+import cv2
+import numpy as np
+import pandas as pd
+
+output_folder = 'C:/Users/matan.yuval/Desktop/pointonMeshFinal_Trial/'
+# Get the document path
+doc_path = Metashape.app.document.path
+# Get the chunk label
+chunk_label = Metashape.app.document.chunk.label
+
+# Extract the project name from the document path
+project_name = os.path.splitext(os.path.basename(doc_path))[0]  # Remove file extension
+
+# Create a combined variable with project name and chunk label
+combined_name = f"{project_name}_{chunk_label}"
+
+# Output the results
+print("Project Name:", project_name)
+print("Chunk Label:", chunk_label)
+print("Combined Name:", combined_name)
+###STEP1 Generate 100 points on mesh
+import open3d as o3d
+import numpy as np
+import pandas as pd
+from sklearn.neighbors import KDTree
+
+def fps(points, n_samples): #From https://minibatchai.com/2021/08/07/FPS.html
+    """
+    points: [N, 3] array containing the whole point cloud
+    n_samples: samples you want in the sampled point cloud typically << N
+    """
+    points = np.array(points)
+
+    # Represent the points by their indices in points
+    points_left = np.arange(len(points)) # [P]
+
+    # Initialise an array for the sampled indices
+    sample_inds = np.zeros(n_samples, dtype='int') # [S]
+
+    # Initialise distances to inf
+    dists = np.ones_like(points_left) * float('inf') # [P]
+
+    # Select a point from points by its index, save it
+    selected = 0
+    sample_inds[0] = points_left[selected]
+
+    # Delete selected
+    points_left = np.delete(points_left, selected) # [P - 1]
+
+    # Iteratively select points for a maximum of n_samples
+    for i in range(1, n_samples):
+        # Find the distance to the last added point in selected
+        # and all the others
+        last_added = sample_inds[i-1]
+
+        dist_to_last_added_point = (
+            (points[last_added] - points[points_left])**2).sum(-1) # [P - i]
+
+        # If closer, updated distances
+        dists[points_left] = np.minimum(dist_to_last_added_point,
+                                        dists[points_left]) # [P - i]
+
+        # We want to pick the one that has the largest nearest neighbour
+        # distance to the sampled points
+        selected = np.argmax(dists[points_left])
+        sample_inds[i] = points_left[selected]
+
+        # Update points_left
+        points_left = np.delete(points_left, selected)
+
+    return points[sample_inds]
+
+
+import Metashape
+import math
+doc = Metashape.app.document
+chunk = doc.chunk
+
+T = chunk.transform.matrix
+
+v_t = T.mulp(Metashape.Vector([0, 0, 0]))
+
+if chunk.crs:
+    m = chunk.crs.localframe(v_t)
+else:
+    m = Metashape.Matrix().Diag([1, 1, 1, 1])
+
+m = m * T
+s = math.sqrt(m[0, 0] ** 2 + m[0, 1] ** 2 + m[0, 2] ** 2)  # scale factor # s = m.scale()
+R = Metashape.Matrix([[m[0, 0], m[0, 1], m[0, 2]],
+                      [m[1, 0], m[1, 1], m[1, 2]],
+                      [m[2, 0], m[2, 1], m[2, 2]]])
+# R = m.rotation()
+
+R = R * (1. / s)
+
+reg = chunk.region
+reg.rot = R.t()
+chunk.region = reg
+
+print("Script finished!")
+
+
+
+new_center = chunk.region.center #coordinates in the chunk coordinate system
+new_size = Metashape.Vector([11, 11, 10]) #size in the coordinate system units
+
+T = chunk.transform.matrix
+S = chunk.transform.scale
+crs = chunk.crs
+
+region = chunk.region
+region.size = new_size / S
+
+chunk.region = region
+
+new_center = chunk.transform.matrix.mulp(chunk.region.center)
+new_size = chunk.transform.scale * chunk.region.size
+
+# Calculate the boundaries of the new region
+half_size = new_size / 2
+min_bounds = new_center - half_size
+max_bounds = new_center + half_size
+
+# Initialize a list to store tie points within the region
+tie_points_in_region = []
+
+
+tie_points_in_region = []
+for i, tie_point in enumerate(chunk.model.vertices):
+    if i % 1000 == 0:  # Select every 1000th point
+        tie_point_position = chunk.transform.matrix.mulp(tie_point.coord[:3])
+        tie_point_position =tie_point_position[:3]
+        # Check if the tie point is within the bounds
+        if (min_bounds.x <= tie_point_position.x <= max_bounds.x and
+            min_bounds.y <= tie_point_position.y <= max_bounds.y and
+            min_bounds.z <= tie_point_position.z <= max_bounds.z):
+            tie_points_in_region.append(tie_point_position)
+
+vertices_np = np.array(tie_points_in_region)
+indices = fps(vertices_np, 2000)
+for pt in indices:
+    target = pt
+    transform_matrix = chunk.transform.matrix
+    #transformed_vector = transform_matrix * target
+    marker = chunk.addMarker()
+    marker.reference.location = target
+    marker.label = f"PT{counter}"
+    counter += 1
+
+
