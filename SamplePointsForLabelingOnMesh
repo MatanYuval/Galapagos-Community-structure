@@ -31,6 +31,59 @@ import numpy as np
 import pandas as pd
 from sklearn.neighbors import KDTree
 
+
+
+###NEW VERSION 24-12:
+
+
+
+# Initialize a list to store tie points within the region
+tie_points_in_region = []
+
+
+tie_points_in_region = []
+for i, tie_point in enumerate(chunk.model.vertices):
+    tie_point_position = chunk.transform.matrix.mulp(tie_point.coord[:3])
+    tie_point_position =tie_point_position[:3]
+    # Check if the tie point is within the bounds
+    if (min_bounds.x <= tie_point_position.x <= max_bounds.x and
+        min_bounds.y <= tie_point_position.y <= max_bounds.y and
+        min_bounds.z <= tie_point_position.z <= max_bounds.z):
+        tie_points_in_region.append(tie_point_position)
+
+vertices_np = np.array(tie_points_in_region)
+
+
+point_cloud = o3d.geometry.PointCloud()
+point_cloud.points = o3d.utility.Vector3dVector(vertices_np)
+
+mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(point_cloud, 0.05)
+sampled_points = mesh.sample_points_poisson_disk( Surface area of model X 10)
+pts = np.asarray(sampled_points.points)
+tree = KDTree(np.asarray(point_cloud.points))
+ind = []
+counter = 0
+for pt in sampled_points.points:
+    if pt is not None:
+        dist, indd = tree.query(np.asarray([pt]), k=1)
+        ind.append(indd)
+pts = np.squeeze(ind)
+for pt in pts:
+    target = tie_points[pt].coord
+    transform_matrix = chunk.transform.matrix
+    transformed_vector = transform_matrix * target
+    marker = chunk.addMarker()
+    marker.reference.location = transformed_vector[:3]
+    marker.label = f"PT{counter}"
+    counter += 1
+
+
+
+
+##OLD VESION BAD::
+
+
+
 def fps(points, n_samples): #From https://minibatchai.com/2021/08/07/FPS.html
     """
     points: [N, 3] array containing the whole point cloud
@@ -154,5 +207,6 @@ for pt in indices:
     marker.reference.location = target
     marker.label = f"PT{counter}"
     counter += 1
+
 
 
