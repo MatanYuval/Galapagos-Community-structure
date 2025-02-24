@@ -1,0 +1,56 @@
+
+import pandas as pd
+import open3d as o3d
+import numpy as np
+import pyvista as pv
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib
+print(np.__version__)
+matplotlib.use('Qt5Agg')
+
+
+def o3d_to_pv(pcd):
+    points = np.asarray(pcd.points)
+    colors = np.asarray(pcd.colors) if pcd.has_colors() else None
+    polydata = pv.PolyData(points)
+    if colors is not None:
+        polydata['colors'] = colors
+    return polydata
+
+
+df = pd.read_csv(r"C:\Users\matan.yuval\Desktop\FinalExperiment2\FinalResults\DatasetForUpload\toZenodo\final_merged_results_22_02_25.csv")
+df['project_id'].unique()
+df= df[df['project_id'] == 'Wolf24']
+pcd1 = o3d.io.read_point_cloud(r"C:\Users\matan.yuval\Desktop\FinalExperiment2\FinalPointClouds\Wolf24_FinalExperimentChunk.ply")
+# Extract positions and labels from DataFrame
+df['label'] = df['classification']
+positions = np.array(df['position'].apply(lambda x: np.fromstring(x.strip('Vector([][])'), sep=',')).tolist())
+color_mapping = {classi: i for i, classi in enumerate(df['label'].unique())}
+# Map 'label' column to colors
+colors = np.array(df['label'].apply(lambda x: plt.cm.tab20(color_mapping[x] / len(color_mapping))[:3]).tolist())
+# Create second point cloud (pcd2) from positions and colors
+pcd2 = o3d.geometry.PointCloud()
+pcd2.points = o3d.utility.Vector3dVector(positions)
+pcd2.colors = o3d.utility.Vector3dVector(colors)
+
+pv_pcd1 = o3d_to_pv(pcd1)
+pv_pcd2 = o3d_to_pv(pcd2)
+# Initialize PyVista plotter with two subplots
+plotter = pv.Plotter()#shape=(1, 2))  # One row, two columns
+plotter.add_mesh(pv_pcd1, scalars='colors', rgb=True, point_size=3, label='Point Cloud 1')
+plotter.add_mesh(pv_pcd2, scalars='colors', rgb=True, point_size=20, label='Point Cloud 2')
+plotter.show_axes()  # Display default axes
+
+
+# Add legend to the left subplot
+legend_entries = []
+for label, index in color_mapping.items():
+    legend_color = plt.cm.tab20(index / len(color_mapping))[:3]
+    legend_entries.append([label, legend_color])
+plotter.add_legend(legend_entries, size=(0.3, 0.3), loc='upper left')
+plotter.set_viewup([0, 1, 0])
+# Add title to the left subplot
+plotter.add_title('Wolf-annotations', font_size=18)
+# Display the plot
+plotter.show()
