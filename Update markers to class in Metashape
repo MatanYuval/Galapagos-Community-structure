@@ -1,0 +1,85 @@
+
+##load in Metashape and get labels for project
+
+import pandas as pd
+chunk = Metashape.app.document.chunk
+csv_path = ""  # Replace with your actual CSV path
+####e.g. csv should have these fields : 
+image_name,classification,projection_quality,pt_number,project_id,image_namee
+PT0_MTN_2375_DarwinMay24_Copy of Copy of Chunk 1_resize.png,Pavona,good,PT0,DarwinMay24,MTN_2375
+PT0_MTN_2471_FloreanaCormorantPt1_Copy of Chunk 1_resize.png,Rock,good,PT0,FloreanaCormorantPt1,MTN_2471
+PT0_MTN_7068_Pinta24_Copy of Chunk 1_resize.png,Rock,good,PT0,Pinta24,MTN_7068
+PT0_MTN_3412_FloreanaCormorantPt1_FinalExperimentChunk_resize.png,Rock,good,PT0,FloreanaCormorantPt1,MTN_3412
+PT1000_MTN_3195_FloreanaCormorantPt1_FinalExperimentChunk_resize.png,Sand,bad,PT1000,FloreanaCormorantPt1,MTN_3195
+#######
+df = pd.read_csv(csv_path)
+###e.g. for Espanola: 
+subset_df = df[df['project_id'] == 'Espanola']
+
+
+# Get unique classifications
+unique_classification = subset_df['classification'].unique()
+
+# Initialize lists for storing marker positions and colors
+positions = []
+colors = []
+
+# Create a color mapping that assigns integers to each classification
+color_mapping = {classi: i for i, classi in enumerate(unique_classification)}
+
+# Example color mapping output
+print(color_mapping)
+
+for marker in chunk.markers:
+    try:
+        # Find the matching row where point_id matches the marker label
+        matching_row = subset_df[subset_df['pt_number'] == marker.label]  # Change site_id to point_id column
+
+        if not matching_row.empty:
+            # Get the classification for the matching row
+            new_label = matching_row['classification'].values[0]
+
+            # Update the marker label with the classification
+            marker.label = marker.label+new_label
+            # print(f"Updated marker {marker} label to {new_label}")
+    except KeyError:
+        print(f"Marker {marker} has no matching classification in the DataFrame.")
+
+##Make new_df for markers to pcd
+# Initialize lists to store the data
+import re  # Import regular expression module
+
+# Initialize empty lists to collect data
+pt_nums = []
+classes = []
+positions = []
+
+# Iterate over the markers in the chunk
+for marker in chunk.markers:
+    # Check if marker.label starts with "PT"
+    if marker.label.startswith("PT"):
+        # Use regex to split the label into number (PT1234) and class (e.g., Coral)
+        match = re.match(r"(PT\d+)([A-Za-z]+)", marker.label)
+
+        if match:
+            pt_num = match.group(1)  # Extract the PT number (e.g., PT1234)
+            class_name = match.group(2)  # Extract the class name (e.g., Coral)
+
+            # Get marker position
+            position = chunk.transform.matrix.mulp(marker.position)
+
+            # Append the data to the lists
+            pt_nums.append(pt_num)
+            classes.append(class_name)
+            positions.append(position)
+
+# Create a DataFrame from the collected data
+new_df = pd.DataFrame({
+    'pt_num': pt_nums,
+    'class': classes,
+    'position': positions
+})
+
+# Display the DataFrame
+print(new_df)
+new_df.to_csv('', index=False)
