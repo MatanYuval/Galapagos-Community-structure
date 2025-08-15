@@ -1,6 +1,31 @@
 
 
 
+def densify_point_cloud(pcd_for_walk):
+    # Convert points from the Open3D point cloud to a numpy array
+    points = np.asarray(pcd_for_walk.points)
+    dense_points = []
+
+    # Loop through each pair of consecutive points and add intermediate points
+    for i in range(len(points) - 1):
+        p1 = points[i]
+        p2 = points[i + 1]
+
+        # Calculate two intermediate points between p1 and p2
+        mid_point1 = p1 + (p2 - p1) / 3
+        mid_point2 = p1 + 2 * (p2 - p1) / 3
+
+        # Append p1, mid_point1, mid_point2, and p2 to the dense_points list
+        dense_points.extend([p1, mid_point1, mid_point2])
+
+    # Add the last point
+    dense_points.append(points[-1])
+
+    # Create a new Open3D point cloud from the densified points
+    pcd_for_walk_dense = o3d.geometry.PointCloud()
+    pcd_for_walk_dense.points = o3d.utility.Vector3dVector(np.array(dense_points))
+
+    return pcd_for_walk_dense
 
 import matplotlib.pyplot as plt
 import numpy as np
