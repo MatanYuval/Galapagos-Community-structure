@@ -1,0 +1,34 @@
+import Metashape
+import numpy as np
+
+chunk = Metashape.app.document.chunk
+
+region = chunk.region
+R = region.rot
+C = region.center
+S = region.size
+
+half_size = S * 0.5
+
+points_in_region = []
+
+for v in chunk.model.vertices:
+    p = Metashape.Vector(v.coord[:3])  # point in chunk coordinates
+
+    # Convert point to region-local coordinates
+    p_local = R.t() * (p - C)
+
+    if (abs(p_local.x) <= half_size.x and
+        abs(p_local.y) <= half_size.y and
+        abs(p_local.z) <= half_size.z):
+
+        # Convert to world/model coordinates if needed
+        p_world = chunk.transform.matrix.mulp(p)
+
+        points_in_region.append([
+            p_world.x,
+            p_world.y,
+            p_world.z
+        ])
+
+vertices_np = np.array(points_in_region)
