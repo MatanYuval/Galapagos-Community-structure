@@ -8,7 +8,6 @@ USER INSTRUCTIONS
    position the reconstruction region around the area you want to sample.
 2. In Metashape, choose Tools > Run Script... and select this Python file.
    The script adds a new "benthicFriend" menu containing two commands:
-
    - Sample points...
      Creates Poisson-distributed markers on the alpha-shape surface.
      Enter the required number of points when prompted. The suggested number
@@ -196,7 +195,7 @@ def sample_benthic_points():
 
         # Density is based on the original Metashape mesh. The alpha-shape
         # mesh is used only as the surface from which points are sampled.
-        surface_area = chunk.model.area() * scale ** 2
+        surface_area = chunk.model.area()
 
         suggested_points = max(
             1,
