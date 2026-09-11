@@ -236,7 +236,7 @@ def sample_benthic_points():
         ):
             marker = chunk.addMarker()
             marker.reference.location = Metashape.Vector(point)
-            marker.label = f"PTxt{index}"
+            marker.label = f"PT_{index}"
 
             if index % 500 == 0:
                 print(
