@@ -32,6 +32,7 @@ NOTES
   automatically. Internet access is required only when installation is needed.
 - Main settings can be changed below: ALPHA, POINTS_PER_UNIT_AREA, CROP_SIZE,
   VIEW_MAGNIFICATION, and MARKER_PREFIX.
+-when exporting synthetic images use full screen view (F11) from the top down view(0 on keyboard)
 """
 
 import importlib
