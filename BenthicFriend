@@ -12,7 +12,7 @@ USER INSTRUCTIONS
      Creates Poisson-distributed markers on the alpha-shape surface.
      Enter the required number of points when prompted. The suggested number
      is based on the original Metashape mesh area. New markers are labelled
-     PTxt1, PTxt2, and so on.
+     PT_1, PT_2, and so on.
 
    - Export marker images...
      First choose the output folder. Then select:
