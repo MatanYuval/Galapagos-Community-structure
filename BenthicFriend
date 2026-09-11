@@ -1,4 +1,41 @@
+"""
+benthicFriend for Agisoft Metashape
+===================================
 
+USER INSTRUCTIONS
+
+1. Open a Metashape project, select the chunk containing the 3D model, and
+   position the reconstruction region around the area you want to sample.
+2. In Metashape, choose Tools > Run Script... and select this Python file.
+   The script adds a new "benthicFriend" menu containing two commands:
+
+   - Sample points...
+     Creates Poisson-distributed markers on the alpha-shape surface.
+     Enter the required number of points when prompted. The suggested number
+     is based on the original Metashape mesh area. New markers are labelled
+     PTxt1, PTxt2, and so on.
+
+   - Export marker images...
+     First choose the output folder. Then select:
+       1 = best real camera image only (default)
+       2 = combined best-camera and synthetic-model image pair
+     Finally select:
+       0 = no red marker (default)
+       1 = add a red marker
+
+   The selected folder receives the images and results_df.txt.
+
+NOTES
+
+- Image export processes markers whose labels begin with "PT".
+- No external coordinate reference system is required.
+- Missing NumPy, Open3D, pandas, and OpenCV packages are installed
+  automatically. Internet access is required only when installation is needed.
+- Main settings can be changed below: ALPHA, POINTS_PER_UNIT_AREA, CROP_SIZE,
+  VIEW_MAGNIFICATION, and MARKER_PREFIX.
+"""
+
+import importlib
 import importlib.util
 import math
 import os
