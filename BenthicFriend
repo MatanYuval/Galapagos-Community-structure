@@ -1,39 +1,3 @@
-"""
-benthicFriend for Agisoft Metashape
-===================================
-
-USER INSTRUCTIONS
-
-1. Open a Metashape project, select the chunk containing the 3D model, and
-   position the reconstruction region around the area you want to sample.
-2. In Metashape, choose Tools > Run Script... and select this Python file.
-   The script adds a new "benthicFriend" menu containing two commands:
-   - Sample points...
-     Creates Poisson-distributed markers on the alpha-shape surface.
-     Enter the required number of points when prompted. The suggested number
-     is based on the original Metashape mesh area. New markers are labelled
-     PT_1, PT_2, and so on.
-
-   - Export marker images...
-     First choose the output folder. Then select:
-       1 = best real camera image only (default)
-       2 = combined best-camera and synthetic-model image pair
-     Finally select:
-       0 = no red marker (default)
-       1 = add a red marker
-
-   The selected folder receives the images and results_df.txt.
-
-NOTES
-
-- Image export processes markers whose labels begin with "PT".
-- No external coordinate reference system is required.
-- Missing NumPy, Open3D, pandas, and OpenCV packages are installed
-  automatically. Internet access is required only when installation is needed.
-- Main settings can be changed below: ALPHA, POINTS_PER_UNIT_AREA, CROP_SIZE,
-  VIEW_MAGNIFICATION, and MARKER_PREFIX.
--when exporting synthetic images use full screen view (F11) from the top down view(0 on keyboard)
-"""
 
 import importlib
 import importlib.util
@@ -53,10 +17,12 @@ REQUIRED_PACKAGES = {
     "open3d": "open3d",
     "pandas": "pandas",
     "cv2": "opencv-python",
+    "sklearn": "scikit-learn",
 }
 
 
 def install_missing_packages():
+    """Automatically install missing dependencies without prompting the user."""
     missing_packages = [
         pip_name
         for import_name, pip_name in REQUIRED_PACKAGES.items()
@@ -66,25 +32,38 @@ def install_missing_packages():
     if not missing_packages:
         return
 
+    # Make sure pip exists in Metashape's Python environment.
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        subprocess.check_call(
+            [sys.executable, "-m", "ensurepip", "--upgrade"]
+        )
+
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-input"
+    ]
+
+    if site.ENABLE_USER_SITE:
+        command.append("--user")
+
+    command.extend(missing_packages)
+
     print(
         "Installing missing benthicFriend packages: "
         + ", ".join(missing_packages)
     )
 
-    command = [sys.executable, "-m", "pip", "install"]
-    if site.ENABLE_USER_SITE:
-        command.append("--user")
-    command.extend(missing_packages)
-
-    try:
-        subprocess.check_call(command)
-    except Exception as error:
-        Metashape.app.messageBox(
-            "Could not install the required Python packages:\n\n"
-            + ", ".join(missing_packages)
-            + f"\n\n{error}"
-        )
-        raise
+    subprocess.check_call(command)
 
     if site.ENABLE_USER_SITE:
         user_site = site.getusersitepackages()
@@ -92,7 +71,6 @@ def install_missing_packages():
             sys.path.append(user_site)
 
     importlib.invalidate_caches()
-    print("Required packages installed successfully.")
 
 
 install_missing_packages()
@@ -101,493 +79,865 @@ import cv2
 import numpy as np
 import open3d as o3d
 import pandas as pd
+from sklearn.neighbors import KDTree
 
 
 ALPHA = 0.05
 POINTS_PER_UNIT_AREA = 10
-CROP_SIZE = 1600
+DEFAULT_CROP_SIZE = 1600
 VIEW_MAGNIFICATION = 1000
+TOP_VIEW_ZOOM_OUT = 1.75
 MARKER_PREFIX = "PT"
 
 SAMPLE_MENU_PATH = "benthicFriend/Sample points..."
 EXPORT_MENU_PATH = "benthicFriend/Export marker images..."
 
-RESULT_COLUMNS = [
-    "Marker Label",
-    "Camera Index",
-    "Camera Label",
-    "Projected 2D Coordinates",
-    "marker_position_chunk_coords",
-]
 
-
-def sample_benthic_points():
-    """Create Poisson-distributed markers on the model surface."""
-
-    try:
-        chunk = Metashape.app.document.chunk
-
-        if chunk is None or chunk.model is None:
-            raise RuntimeError("The active chunk has no 3D model.")
-
-        T = chunk.transform.matrix
-        origin = T.mulp(Metashape.Vector([0, 0, 0]))
-
-        local_frame = (
-            chunk.crs.localframe(origin)
-            if chunk.crs
-            else Metashape.Matrix().Diag([1, 1, 1, 1])
-        )
-
-        m = local_frame * T
-        scale = math.sqrt(sum(m[0, i] ** 2 for i in range(3)))
-
-        if scale == 0:
-            raise RuntimeError("The chunk transformation has zero scale.")
-
-        rotation = Metashape.Matrix([
-            [m[row, column] / scale for column in range(3)]
-            for row in range(3)
-        ])
-
-        region = chunk.region
-        region.rot = rotation.t()
-        chunk.region = region
-
-        center = T.mulp(region.center)
-        half_size = chunk.transform.scale * region.size / 2
-
-        min_bounds = np.asarray(center - half_size)
-        max_bounds = np.asarray(center + half_size)
-
-        vertices = []
-
-        for vertex in chunk.model.vertices:
-            position = np.asarray(
-                T.mulp(vertex.coord[:3])[:3]
-            )
-
-            if np.all(
-                (position >= min_bounds)
-                & (position <= max_bounds)
-            ):
-                vertices.append(position)
-
-        if len(vertices) < 4:
-            raise RuntimeError(
-                "Not enough model vertices were found inside the region."
-            )
-
-        vertices = np.asarray(vertices, dtype=np.float64)
-
-        point_cloud = o3d.geometry.PointCloud()
-        point_cloud.points = o3d.utility.Vector3dVector(vertices)
-
-        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(
-            point_cloud,
-            ALPHA
-        )
-
-        if len(mesh.triangles) == 0:
-            raise RuntimeError(
-                "The alpha-shape mesh is empty. "
-                "Try changing the ALPHA value."
-            )
-
-        # Density is based on the original Metashape mesh. The alpha-shape
-        # mesh is used only as the surface from which points are sampled.
-        surface_area = chunk.model.area()
-
-        suggested_points = max(
-            1,
-            round(surface_area * POINTS_PER_UNIT_AREA)
-        )
-
-        print(f"Original mesh surface area: {surface_area:.3f}")
-        print(
-            f"Suggested points: {suggested_points} "
-            f"({POINTS_PER_UNIT_AREA} points per unit²)"
-        )
-
-        number_of_points = Metashape.app.getInt(
-            (
-                f"Original mesh surface area: {surface_area:.2f} unit²\n"
-                f"Suggested density: {POINTS_PER_UNIT_AREA} points/unit²\n"
-                "Number of points to sample:"
-            ),
-            suggested_points
-        )
-
-        if number_of_points is None:
-            return
-
-        if number_of_points < 1:
-            raise ValueError(
-                "The number of points must be greater than zero."
-            )
-
-        sampled_cloud = mesh.sample_points_poisson_disk(
-            number_of_points=number_of_points,
-            init_factor=5
-        )
-
-        for index, point in enumerate(
-            sampled_cloud.points,
-            start=1
-        ):
-            marker = chunk.addMarker()
-            marker.reference.location = Metashape.Vector(point)
-            marker.label = f"PT_{index}"
-
-            if index % 500 == 0:
-                print(
-                    f"Created {index}/{number_of_points} markers"
-                )
-
-        Metashape.app.update()
-
-        Metashape.app.messageBox(
-            f"Original mesh surface area: {surface_area:.2f} unit²\n"
-            f"Created {number_of_points} sampling points."
-        )
-
-    except Exception as error:
-        Metashape.app.messageBox(
-            f"Could not create sampling points:\n\n{error}"
-        )
-        raise
-
-
-def vector_magnitude(vector):
-    return math.sqrt(sum(vector[i] ** 2 for i in range(3)))
+def vector_magnitude(vec):
+    return (vec[0] ** 2 + vec[1] ** 2 + vec[2] ** 2) ** 0.5
 
 
 def safe_filename(value):
-    """Replace characters that are not safe in Windows filenames."""
     return re.sub(r'[<>:"/\\|?*]+', "_", str(value)).strip(" .")
 
 
-def find_best_camera(chunk, marker):
-    """Return the real camera whose projected ray lands closest to the marker."""
-    candidates = []
+def sample_benthic_points():
+    """
+    1. Read original Metashape mesh vertices in world coordinates.
+    2. Build alpha-shape surface.
+    3. Poisson-sample the alpha shape.
+    4. KD-tree finds nearest ORIGINAL mesh vertex index.
+    5. Convert that selected world vertex back to internal coordinates.
+    6. Add the marker on the model with chunk.addMarker(point_internal).
+    7. Preserve the exact world coordinate in marker.reference.location.
+    """
+    chunk = Metashape.app.document.chunk
 
-    for camera_index, camera in enumerate(chunk.cameras):
-        if camera.transform is None:
-            continue
+    if chunk is None or chunk.model is None:
+        raise RuntimeError("The active chunk has no 3D model.")
 
-        projected = camera.project(marker.position)
-        if projected is None:
-            continue
+    T = chunk.transform.matrix
 
-        x, y = projected
-        if not (
-            camera.sensor.width / 8 <= x < camera.sensor.width * 7 / 8
-            and camera.sensor.height / 8 <= y < camera.sensor.height * 7 / 8
-        ):
-            continue
+    origin = T.mulp(Metashape.Vector([0, 0, 0]))
 
-        surface_point = chunk.model.pickPoint(
-            camera.center,
-            camera.unproject(projected),
-        )
-        if surface_point is None:
-            continue
+    if chunk.crs:
+        m = chunk.crs.localframe(origin)
+    else:
+        m = Metashape.Matrix().Diag([1, 1, 1, 1])
 
-        # No external CRS is required because both values use the same
-        # internal chunk coordinate system.
-        error = vector_magnitude(surface_point - marker.position)
-        candidates.append((error, camera_index, camera, projected))
+    m = m * T
 
-    if not candidates:
-        return None
-
-    return min(candidates, key=lambda item: item[0])
-
-
-def orient_projected_point(camera, x, y):
-    """Convert sensor coordinates to the orientation of the image file."""
-    if camera.orientation == 6:  # 90 degrees clockwise
-        return int(camera.sensor.height - y), int(x)
-    if camera.orientation == 8:  # 270 degrees clockwise
-        return int(y), int(camera.sensor.width - x)
-    if camera.orientation == 3:  # 180 degrees
-        return int(camera.sensor.width - x), int(camera.sensor.height - y)
-    return int(x), int(y)
-
-
-def crop_camera_image(camera, projected):
-    image = cv2.imread(camera.photo.path)
-    if image is None:
-        raise RuntimeError(f"Could not load camera image: {camera.photo.path}")
-
-    point_x, point_y = orient_projected_point(
-        camera,
-        projected[0],
-        projected[1],
+    scale = math.sqrt(
+        m[0, 0] ** 2 +
+        m[0, 1] ** 2 +
+        m[0, 2] ** 2
     )
 
-    x_start = max(0, point_x - CROP_SIZE // 2)
-    y_start = max(0, point_y - CROP_SIZE // 2)
-    x_end = min(image.shape[1], point_x + CROP_SIZE // 2)
-    y_end = min(image.shape[0], point_y + CROP_SIZE // 2)
+    R = Metashape.Matrix([
+        [m[0, 0], m[0, 1], m[0, 2]],
+        [m[1, 0], m[1, 1], m[1, 2]],
+        [m[2, 0], m[2, 1], m[2, 2]]
+    ]) * (1.0 / scale)
 
-    cropped = image[y_start:y_end, x_start:x_end].copy()
-    crop_point = (point_x - x_start, point_y - y_start)
-    return cropped, crop_point, (point_x, point_y)
+    region = chunk.region
+    region.rot = R.t()
+    chunk.region = region
 
+    center = T.mulp(region.center)
+    half_size = chunk.transform.scale * region.size / 2
 
-def capture_synthetic_view(chunk, marker, output_folder):
-    """Capture the Metashape model view centred on a marker."""
-    if marker.reference.location is not None:
-        view_center = marker.reference.location
-    else:
-        view_center = chunk.transform.matrix.mulp(marker.position)
+    min_bounds = np.asarray(center - half_size)
+    max_bounds = np.asarray(center + half_size)
 
-    Metashape.app.model_view.viewpoint.coo = view_center
-    Metashape.app.model_view.viewpoint.mag = VIEW_MAGNIFICATION
+    vertices = []
+
+    for vertex in chunk.model.vertices:
+        position = np.asarray(
+            T.mulp(vertex.coord[:3])[:3],
+            dtype=np.float64
+        )
+
+        if np.all(
+            (position >= min_bounds) &
+            (position <= max_bounds)
+        ):
+            vertices.append(position)
+
+    if len(vertices) < 4:
+        raise RuntimeError(
+            "Not enough model vertices were found inside the region."
+        )
+
+    vertices = np.asarray(vertices, dtype=np.float64)
+
+    point_cloud = o3d.geometry.PointCloud()
+    point_cloud.points = o3d.utility.Vector3dVector(vertices)
+
+    mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(
+        point_cloud,
+        ALPHA
+    )
+
+    if len(mesh.triangles) == 0:
+        raise RuntimeError(
+            "The alpha-shape mesh is empty. Try changing ALPHA."
+        )
+
+    # Metashape mesh area is already scaled.
+    surface_area = chunk.model.area()
+
+    suggested_points = max(
+        1,
+        round(surface_area * POINTS_PER_UNIT_AREA)
+    )
+
+    number_of_points = Metashape.app.getInt(
+        (
+            f"Metashape mesh surface area: {surface_area:.2f} unit²\n"
+            f"Suggested density: {POINTS_PER_UNIT_AREA} points/unit²\n"
+            "Number of points to sample:"
+        ),
+        suggested_points
+    )
+
+    if number_of_points is None:
+        return
+
+    sampled_points = mesh.sample_points_poisson_disk(
+        number_of_points=number_of_points,
+        init_factor=5
+    )
+
+    sampled_points = np.asarray(
+        sampled_points.points,
+        dtype=np.float64
+    )
+
+    tree = KDTree(vertices)
+    _, nearest_indices = tree.query(sampled_points, k=1)
+    nearest_indices = nearest_indices[:, 0]
+
+    for index, vertex_index in enumerate(nearest_indices, start=1):
+        point_world = Metashape.Vector(
+            vertices[vertex_index].tolist()
+        )
+
+        point_internal = T.inv().mulp(point_world)
+
+        marker = chunk.addMarker(point_internal)
+        marker.reference.location = point_world
+        marker.label = f"PTxt{index}"
+
+        if index % 500 == 0:
+            print(f"Created {index}/{number_of_points} markers")
+
     Metashape.app.update()
 
-    rendered = Metashape.app.model_view.captureView(
-        CROP_SIZE,
-        CROP_SIZE,
-        False,
-        True,
+    Metashape.app.messageBox(
+        f"Created {number_of_points} sampling points."
     )
 
-    descriptor, temporary_path = tempfile.mkstemp(
-        prefix="benthicFriend_render_",
+
+
+def metashape_image_to_cv2(image, output_folder, prefix):
+    """Temporarily save a Metashape.Image and read it with OpenCV."""
+    descriptor, path = tempfile.mkstemp(
+        prefix=prefix,
         suffix=".png",
-        dir=output_folder,
+        dir=output_folder
     )
+
     os.close(descriptor)
-    os.remove(temporary_path)
+    os.remove(path)
 
     try:
-        rendered.save(temporary_path)
-        image = cv2.imread(temporary_path)
-        if image is None:
-            raise RuntimeError("Could not read the captured synthetic view.")
-        return image
+        image.save(path)
+        image_np = cv2.imread(path)
+
+        if image_np is None:
+            raise RuntimeError(
+                "Could not read rendered synthetic image."
+            )
+
+        return image_np
+
     finally:
-        if os.path.exists(temporary_path):
-            os.remove(temporary_path)
+        if os.path.exists(path):
+            os.remove(path)
 
 
-def add_red_mark(image, point, filled=False):
-    thickness = -1 if filled else 5
-    cv2.circle(
-        image,
-        (int(point[0]), int(point[1])),
-        radius=10,
-        color=(0, 0, 255),
-        thickness=thickness,
+def orient_image_like_photo(image, camera):
+    """Apply the same orientation cases used for the real photo."""
+    if camera.orientation == 6:
+        return cv2.rotate(
+            image,
+            cv2.ROTATE_90_CLOCKWISE
+        )
+
+    if camera.orientation == 8:
+        return cv2.rotate(
+            image,
+            cv2.ROTATE_90_COUNTERCLOCKWISE
+        )
+
+    if camera.orientation == 3:
+        return cv2.rotate(
+            image,
+            cv2.ROTATE_180
+        )
+
+    return image
+
+
+def crop_around_point(image, x, y, crop_size):
+    """Crop `crop_size` pixels around a point."""
+    x = int(x)
+    y = int(y)
+
+    x_start = max(
+        0,
+        x - crop_size // 2
     )
+
+    y_start = max(
+        0,
+        y - crop_size // 2
+    )
+
+    x_end = min(
+        image.shape[1],
+        x + crop_size // 2
+    )
+
+    y_end = min(
+        image.shape[0],
+        y + crop_size // 2
+    )
+
+    cropped = image[
+        y_start:y_end,
+        x_start:x_end
+    ].copy()
+
+    point_in_crop = (
+        x - x_start,
+        y - y_start
+    )
+
+    return cropped, point_in_crop
+
+
+
+def get_chunk_rotation(chunk):
+    """
+    Return the chunk rotation matrix.
+
+    Some Metashape chunks have a valid chunk.transform.matrix but
+    chunk.transform.rotation is None. In that case derive the rotation
+    from the scaled 3x3 part of the transformation matrix.
+    """
+    rotation = chunk.transform.rotation
+
+    if rotation is not None:
+        return rotation
+
+    T = chunk.transform.matrix
+
+    scale = math.sqrt(
+        T[0, 0] ** 2 +
+        T[0, 1] ** 2 +
+        T[0, 2] ** 2
+    )
+
+    if scale == 0:
+        raise RuntimeError(
+            "Chunk transformation has zero scale."
+        )
+
+    return Metashape.Matrix([
+        [T[0, 0] / scale, T[0, 1] / scale, T[0, 2] / scale],
+        [T[1, 0] / scale, T[1, 1] / scale, T[1, 2] / scale],
+        [T[2, 0] / scale, T[2, 1] / scale, T[2, 2] / scale],
+    ])
+
+
+def render_standardized_top_view(
+    chunk,
+    marker,
+    crop_size,
+    output_folder
+):
+    """
+    Render a standardized top-down synthetic view centred on the marker.
+
+    This follows the user's earlier Metashape renderImage approach:
+    virtual camera above the marker, fixed top-down orientation,
+    square calibration.
+    """
+    target_marker = marker.position
+
+    if target_marker is None:
+        raise RuntimeError(
+            f"{marker.label} has no internal 3D position."
+        )
+
+    region = chunk.region
+
+    # Put the virtual camera above the marker along the region Z axis.
+    height = max(
+        0.1 * region.size.z * TOP_VIEW_ZOOM_OUT,
+        1e-6
+    )
+
+    location = (
+        target_marker
+        + region.rot
+        * Metashape.Vector([0, 0, height])
+    )
+
+    chunk_rotation = get_chunk_rotation(chunk)
+
+    R = (
+        chunk_rotation.t()
+        * Metashape.Matrix().Diag([1, -1, -1])
+    )
+
+    cameraT = (
+        Metashape.Matrix().Translation(location)
+        * Metashape.Matrix().Rotation(R)
+    )
+
+    calibration = Metashape.Calibration()
+    calibration.width = crop_size
+    calibration.height = crop_size
+    calibration.f = crop_size // 2
+
+    rendered = chunk.model.renderImage(
+        cameraT,
+        calibration
+    )
+
+    return metashape_image_to_cv2(
+        rendered,
+        output_folder,
+        "benthicFriend_top_"
+    )
+
+
+def render_selected_camera_view(
+    chunk,
+    camera,
+    old_x,
+    old_y,
+    new_x,
+    new_y,
+    crop_size,
+    output_folder
+):
+    """
+    Render the model from the selected real camera using the same aligned
+    camera transform and calibration, then apply the same orientation
+    correction and crop around the same projected marker location.
+    """
+    rendered = chunk.model.renderImage(
+        camera.transform,
+        camera.sensor.calibration
+    )
+
+    image_np = metashape_image_to_cv2(
+        rendered,
+        output_folder,
+        "benthicFriend_camera_"
+    )
+
+    image_np = orient_image_like_photo(
+        image_np,
+        camera
+    )
+
+    synthetic_crop, synthetic_point = crop_around_point(
+        image_np,
+        new_x,
+        new_y,
+        crop_size
+    )
+
+    return synthetic_crop, synthetic_point
 
 
 def export_marker_images():
-    """Export a table and either one real image or a real/synthetic pair."""
-    try:
-        output_folder = Metashape.app.getExistingDirectory(
-            "Choose the output folder"
+    """
+    Export logic kept as close as possible to the user's original code.
+
+    Intentional additions only:
+    - choose output folder
+    - choose crop size
+    - choose red mark yes/no
+    - choose synthetic image yes/no
+    - explicit orientation 3 handling
+    """
+
+    chunk = Metashape.app.document.chunk
+
+    if chunk is None or chunk.model is None:
+        raise RuntimeError("The active chunk has no 3D model.")
+
+    output_root = Metashape.app.getExistingDirectory(
+        "Choose the output folder"
+    )
+    if not output_root:
+        return
+
+    crop_size = Metashape.app.getInt(
+        "Image crop size in pixels around the point:",
+        DEFAULT_CROP_SIZE
+    )
+    if crop_size is None:
+        return
+
+    red_mark_choice = Metashape.app.getInt(
+        "Add red mark?\n0 = no\n1 = yes",
+        1
+    )
+    if red_mark_choice is None:
+        return
+    add_red_mark = red_mark_choice == 1
+
+    synthetic_choice = Metashape.app.getInt(
+        "Export synthetic 3D model image?\n"
+        "0 = no\n"
+        "1 = yes",
+        1
+    )
+    if synthetic_choice is None:
+        return
+    export_synthetic = synthetic_choice == 1
+
+    synthetic_view_mode = None
+
+    if export_synthetic:
+        synthetic_view_mode = Metashape.app.getInt(
+            "Synthetic view:\n"
+            "1 = standardized top view\n"
+            "2 = match selected camera",
+            1
         )
-        if not output_folder:
+
+        if synthetic_view_mode is None:
             return
 
-        image_mode = Metashape.app.getInt(
-            "Image output:\n"
-            "1 = best real camera only (default)\n"
-            "2 = best real camera + synthetic model view",
-            1,
-        )
-        if image_mode is None:
-            return
-        if image_mode not in (1, 2):
-            raise ValueError("Image output must be 1 or 2.")
-
-        red_mark_choice = Metashape.app.getInt(
-            "Add a red mark?\n"
-            "0 = no (default)\n"
-            "1 = yes",
-            0,
-        )
-        if red_mark_choice is None:
-            return
-        if red_mark_choice not in (0, 1):
-            raise ValueError("Red-mark choice must be 0 or 1.")
-        add_mark = red_mark_choice == 1
-
-        chunk = Metashape.app.document.chunk
-        if chunk is None or chunk.model is None:
-            raise RuntimeError("The active chunk has no 3D model.")
-
-        markers = [
-            marker
-            for marker in chunk.markers
-            if marker.label.startswith(MARKER_PREFIX)
-            and marker.position is not None
-        ]
-        if not markers:
-            raise RuntimeError(
-                f'No markers beginning with "{MARKER_PREFIX}" were found.'
+        if synthetic_view_mode not in (1, 2):
+            raise ValueError(
+                "Synthetic view must be 1 or 2."
             )
 
-        os.makedirs(output_folder, exist_ok=True)
+    doc_path = Metashape.app.document.path
+    chunk_label = chunk.label
+    project_name = (
+        os.path.splitext(os.path.basename(doc_path))[0]
+        if doc_path
+        else "MetashapeProject"
+    )
 
-        document_path = Metashape.app.document.path
-        project_name = (
-            os.path.splitext(os.path.basename(document_path))[0]
-            if document_path
-            else "MetashapeProject"
-        )
-        combined_name = f"{project_name}_{chunk.label}"
+    combined_name = f"{project_name}_{chunk_label}"
 
-        results = []
-        exported_count = 0
+    output_folder = os.path.join(
+        output_root,
+        safe_filename(combined_name)
+    )
+    os.makedirs(output_folder, exist_ok=True)
 
-        for marker in markers:
-            best = find_best_camera(chunk, marker)
-            if best is None:
-                print(f"No suitable camera found for {marker.label}; skipped.")
+    results = []
+
+    pt_markers = [
+        marker
+        for marker in chunk.markers
+        if marker.label.startswith(MARKER_PREFIX)
+    ]
+
+    for marker in pt_markers:
+
+        errs = []
+        camera_indices = []
+        coords_list = []
+
+        if not len(marker.projections.keys()) and not marker.position:
+            continue
+
+        # Keep the original working camera-selection logic:
+        # marker.position -> camera.project -> central image check
+        # -> pickPoint -> world error -> choose minimum error.
+        for camera_index, camera in enumerate(chunk.cameras):
+
+            if not marker.position:
                 continue
 
-            _error, camera_index, camera, projected = best
+            if not camera.transform:
+                continue
 
-            try:
-                real_image, real_point, oriented_point = crop_camera_image(
-                    camera,
-                    projected,
+            point = marker.position
+            coords_2D = camera.project(point)
+
+            if coords_2D is None:
+                continue
+
+            x, y = coords_2D
+
+            if (
+                camera.sensor.width / 8 <= x < camera.sensor.width / 8 * 7
+                and
+                camera.sensor.height / 8 <= y < camera.sensor.height / 8 * 7
+            ):
+                point_internal = chunk.model.pickPoint(
+                    camera.center,
+                    camera.unproject(coords_2D)
                 )
 
-                if add_mark:
-                    add_red_mark(real_image, real_point)
-
-                marker_name = safe_filename(marker.label)
-                camera_label = safe_filename(camera.label)
-                project_label = safe_filename(project_name)
-
-                if image_mode == 1:
-                    output_name = (
-                        f"{marker_name}_{camera_label}_"
-                        f"x{oriented_point[0]}_y{oriented_point[1]}_"
-                        f"{project_label}.png"
-                    )
-                    output_image = real_image
-                else:
-                    synthetic_image = capture_synthetic_view(
-                        chunk,
-                        marker,
-                        output_folder,
-                    )
-                    if add_mark:
-                        synthetic_center = (
-                            synthetic_image.shape[1] // 2,
-                            synthetic_image.shape[0] // 2,
-                        )
-                        add_red_mark(
-                            synthetic_image,
-                            synthetic_center,
-                            filled=True,
-                        )
-
-                    if real_image.shape[0] != synthetic_image.shape[0]:
-                        new_width = round(
-                            synthetic_image.shape[1]
-                            * real_image.shape[0]
-                            / synthetic_image.shape[0]
-                        )
-                        synthetic_image = cv2.resize(
-                            synthetic_image,
-                            (new_width, real_image.shape[0]),
-                        )
-
-                    separator = np.zeros(
-                        (real_image.shape[0], 5, 3),
-                        dtype=np.uint8,
-                    )
-                    output_image = np.hstack(
-                        (real_image, separator, synthetic_image)
+                if point_internal is not None:
+                    # reference.location was created from T.mulp(vertex),
+                    # so compare against the picked point in the same
+                    # transformed/world coordinate system.
+                    point3D_world = chunk.transform.matrix.mulp(
+                        point_internal
                     )
 
-                    pair_height = round(
-                        output_image.shape[0]
-                        * CROP_SIZE
-                        / output_image.shape[1]
-                    )
-                    output_image = cv2.resize(
-                        output_image,
-                        (CROP_SIZE, pair_height),
-                    )
-                    output_name = (
-                        f"{marker_name}_{camera_label}_"
-                        f"{safe_filename(combined_name)}_pair.png"
-                    )
+                    err = marker.reference.location - point3D_world
 
-                output_path = os.path.join(output_folder, output_name)
-                if not cv2.imwrite(output_path, output_image):
-                    raise RuntimeError(f"Could not save image: {output_path}")
+                    errs.append(err)
+                    camera_indices.append(
+                        (camera_index, camera.label)
+                    )
+                    coords_list.append(coords_2D)
 
-                transformed_position = chunk.transform.matrix.mulp(
+        if errs:
+
+            magnitudes = [
+                vector_magnitude(err)
+                for err in errs
+            ]
+
+            error_info = [
+                (
+                    magnitudes[i],
+                    errs[i],
+                    camera_indices[i],
+                    coords_list[i]
+                )
+                for i in range(len(magnitudes))
+            ]
+
+            error_info.sort(
+                key=lambda x: x[0]
+            )
+
+            min_error = error_info[0]
+
+            coords_int = (
+                int(min_error[3][0]),
+                int(min_error[3][1])
+            )
+
+            camera_index, camera_label = min_error[2]
+
+            marker_position_chunk_coords = (
+                chunk.transform.matrix.mulp(
                     marker.position
                 )
-                results.append({
-                    "Marker Label": marker.label,
-                    "Camera Index": camera_index,
-                    "Camera Label": camera.label,
-                    "Projected 2D Coordinates": (
-                        int(projected[0]),
-                        int(projected[1]),
-                    ),
-                    "marker_position_chunk_coords": transformed_position,
-                })
-                exported_count += 1
+            )
 
-            except Exception as marker_error:
-                print(f"Could not export {marker.label}: {marker_error}")
+            results.append(
+                (
+                    marker.label,
+                    camera_index,
+                    camera_label,
+                    coords_int,
+                    marker_position_chunk_coords,
+                    float(min_error[0])
+                )
+            )
 
-        results_df = pd.DataFrame(results, columns=RESULT_COLUMNS)
-        dataframe_path = os.path.join(output_folder, "results_df.txt")
-        results_df.to_csv(dataframe_path, index=False, header=True)
-
+    if not results:
         Metashape.app.messageBox(
-            f"Export complete.\n\n"
-            f"Images created: {exported_count}\n"
-            f"DataFrame: {dataframe_path}"
+            "No suitable camera images were found for the PT markers."
+        )
+        return
+
+    results_df = pd.DataFrame(
+        results,
+        columns=[
+            "Marker Label",
+            "Camera Index",
+            "Camera Label",
+            "Projected 2D Coordinates",
+            "marker_position_chunk_coords",
+            "Projection Error"
+        ]
+    )
+
+    results_df_path = os.path.join(
+        output_folder,
+        "results_df.txt"
+    )
+
+    results_df.to_csv(
+        results_df_path,
+        index=False,
+        header=True
+    )
+
+    combined_output_folder_path = os.path.join(
+        output_folder,
+        "combined_images"
+    )
+
+    if export_synthetic:
+        os.makedirs(
+            combined_output_folder_path,
+            exist_ok=True
         )
 
-    except Exception as error:
-        Metashape.app.messageBox(
-            f"Could not export marker images:\n\n{error}"
+    for _, row in results_df.iterrows():
+
+        camera_index = row["Camera Index"]
+        coords = row["Projected 2D Coordinates"]
+        old_x, old_y = coords
+        marker_name = row["Marker Label"]
+
+        camera = chunk.cameras[camera_index]
+
+        image_path = camera.photo.path
+        image = cv2.imread(image_path)
+
+        if image is None:
+            print(
+                f"Error loading image: {image_path}. "
+                "Skipping this marker."
+            )
+            continue
+
+        sensor_width = camera.sensor.width
+        sensor_height = camera.sensor.height
+
+        # Original orientations + explicit 180° case.
+        if camera.orientation == 6:
+            new_x, new_y = (
+                sensor_height - old_y,
+                old_x
+            )
+
+        elif camera.orientation == 8:
+            new_x, new_y = (
+                old_y,
+                sensor_width - old_x
+            )
+
+        elif camera.orientation == 3:
+            new_x, new_y = (
+                sensor_width - old_x,
+                sensor_height - old_y
+            )
+
+        else:
+            new_x = old_x
+            new_y = old_y
+
+        x_start = max(
+            0,
+            new_x - crop_size // 2
         )
-        raise
+
+        y_start = max(
+            0,
+            new_y - crop_size // 2
+        )
+
+        x_end = min(
+            image.shape[1],
+            new_x + crop_size // 2
+        )
+
+        y_end = min(
+            image.shape[0],
+            new_y + crop_size // 2
+        )
+
+        cropped_image = image[
+            y_start:y_end,
+            x_start:x_end
+        ].copy()
+
+        point_x = new_x - x_start
+        point_y = new_y - y_start
+
+        if add_red_mark:
+            cv2.circle(
+                cropped_image,
+                (point_x, point_y),
+                radius=10,
+                color=(0, 0, 255),
+                thickness=5
+            )
+
+        camera_label = safe_filename(
+            camera.label
+        )
+
+        filename = (
+            f"{marker_name}_{camera_label}_"
+            f"x{new_x}_y{new_y}.png"
+        )
+
+        output_path = os.path.join(
+            output_folder,
+            filename
+        )
+
+        cv2.imwrite(
+            output_path,
+            cropped_image
+        )
+
+        if not export_synthetic:
+            continue
+
+        marker = [
+            marker
+            for marker in chunk.markers
+            if marker.label == marker_name
+        ][0]
+
+        if synthetic_view_mode == 1:
+            image_np = render_standardized_top_view(
+                chunk,
+                marker,
+                crop_size,
+                output_folder
+            )
+
+            synthetic_point = (
+                image_np.shape[1] // 2,
+                image_np.shape[0] // 2
+            )
+
+        else:
+            image_np, synthetic_point = render_selected_camera_view(
+                chunk,
+                camera,
+                old_x,
+                old_y,
+                new_x,
+                new_y,
+                crop_size,
+                output_folder
+            )
+
+        if add_red_mark:
+            cv2.circle(
+                image_np,
+                synthetic_point,
+                radius=10,
+                color=(0, 0, 255),
+                thickness=-1
+            )
+
+        synthetic_view_name = (
+            "top"
+            if synthetic_view_mode == 1
+            else "camera"
+        )
+
+        filename = (
+            f"{marker_name}_3DModel_"
+            f"{synthetic_view_name}_"
+            f"{safe_filename(combined_name)}.png"
+        )
+
+        output_with_marker_path = os.path.join(
+            output_folder,
+            filename
+        )
+
+        cv2.imwrite(
+            output_with_marker_path,
+            image_np
+        )
+
+        img1 = cropped_image
+        img2 = image_np
+
+        if img1.shape[0] != img2.shape[0]:
+            img2 = cv2.resize(
+                img2,
+                (
+                    img2.shape[1],
+                    img1.shape[0]
+                )
+            )
+
+        black_line = np.zeros(
+            (
+                img1.shape[0],
+                5,
+                3
+            ),
+            dtype=np.uint8
+        )
+
+        combined_image = np.hstack(
+            (
+                img1,
+                black_line,
+                img2
+            )
+        )
+
+        combined_filename = (
+            f"{marker.label}_{camera_label}_"
+            f"{synthetic_view_name}_"
+            f"{safe_filename(combined_name)}.png"
+        )
+
+        combined_output_path = os.path.join(
+            combined_output_folder_path,
+            combined_filename
+        )
+
+        cv2.imwrite(
+            combined_output_path,
+            combined_image
+        )
+
+    Metashape.app.messageBox(
+        f"Export complete.\n\n"
+        f"Markers exported: {len(results_df)}\n"
+        f"Results: {results_df_path}"
+    )
 
 
 def register_menu():
-    legacy_paths = (
-        "benthiFriend/Sample points...",
-        "benthiFriend/Export marker images...",
-    )
 
     for menu_path in (
         SAMPLE_MENU_PATH,
         EXPORT_MENU_PATH,
-        *legacy_paths,
+        "benthiFriend/Sample points...",
+        "benthiFriend/Export marker images..."
     ):
         try:
-            Metashape.app.removeMenuItem(menu_path)
+            Metashape.app.removeMenuItem(
+                menu_path
+            )
         except Exception:
             pass
 
     Metashape.app.addMenuItem(
         SAMPLE_MENU_PATH,
-        sample_benthic_points,
-    )
-    Metashape.app.addMenuItem(
-        EXPORT_MENU_PATH,
-        export_marker_images,
+        sample_benthic_points
     )
 
-    print(f"Menu registered: {SAMPLE_MENU_PATH}")
-    print(f"Menu registered: {EXPORT_MENU_PATH}")
+    Metashape.app.addMenuItem(
+        EXPORT_MENU_PATH,
+        export_marker_images
+    )
 
 
 register_menu()
